@@ -64,6 +64,7 @@ export const MINER_PRESETS: MinerSpec[] = [
   { name: 'Bitmain S19j Pro', powerW: 3068, hashrateTH: 104 },
   { name: 'Bitmain S19k Pro', powerW: 2760, hashrateTH: 120 },
   { name: 'Bitmain S9', powerW: 1400, hashrateTH: 13.5 },
+  { name: 'Single Board S19 Pro', powerW: 850, hashrateTH: 30 },
 ]
 
 // Default custom miner specs for the calculator
@@ -445,7 +446,7 @@ export function getMinerEfficiency(miner: MinerSpec): number {
  */
 export function formatCOPe(cope: number): string {
   if (!isFinite(cope)) {
-    return '∞ (Free)'
+    return 'Infinity (Free)'
   }
   if (cope < 0) {
     return 'Paid to heat!'

@@ -89,14 +89,16 @@ export interface SolarEstimate {
   lat: number
   lon: number
 
-  // Production data
+  // Production data - THESE ARE USED FOR CALCULATIONS
   annualKwh: number           // Total annual production (kWh)
   monthlyKwh: number[]        // Monthly production (12 values)
   capacityFactor: number      // Capacity factor (%)
 
-  // Solar resource
-  avgSunHoursPerDay: number   // Average daily sun hours
-  monthlySunHours: number[]   // Monthly average sun hours (12 values)
+  // Solar resource - INFORMATIONAL ONLY, NOT USED FOR REVENUE CALCULATIONS
+  // Note: These are solar irradiance values (kWh/m²/day) from NREL, not operating hours.
+  // Revenue calculations derive directly from monthlyKwh using miner efficiency and hashvalue.
+  avgSunHoursPerDay: number   // Average daily solar irradiance (kWh/m²/day)
+  monthlySunHours: number[]   // Monthly solar irradiance (12 values, kWh/m²/day)
 }
 
 export interface SolarAPIError {
@@ -276,36 +278,4 @@ function generateMonthlyEstimate(annualKwh: number): number[] {
   ]
 
   return monthlyFactors.map(factor => Math.round(annualKwh * factor))
-}
-
-/**
- * Calculate effective sun hours per day from production data.
- *
- * @param annualKwh - Annual production in kWh
- * @param systemCapacityKw - System size in kW
- * @returns Average sun hours per day
- */
-export function calculateSunHours(annualKwh: number, systemCapacityKw: number): number {
-  // sun_hours = annual_kwh / (system_kw * 365)
-  return annualKwh / (systemCapacityKw * 365)
-}
-
-/**
- * Calculate how many miners a solar system can support.
- *
- * @param systemCapacityKw - System size in kW
- * @param minerPowerW - Single miner power in watts
- * @returns Maximum number of miners
- */
-export function calculateMaxMiners(systemCapacityKw: number, minerPowerW: number): number {
-  const systemWatts = systemCapacityKw * 1000
-  return Math.floor(systemWatts / minerPowerW)
-}
-
-/**
- * Get month name from index (0-11).
- */
-export function getMonthName(index: number): string {
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  return months[index] || ''
 }

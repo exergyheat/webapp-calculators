@@ -1,14 +1,18 @@
 import { useState, useMemo, useEffect } from 'react'
-import { Sun, Zap, Loader2, TrendingUp, DollarSign, Bolt, BookOpen, Bitcoin, Pencil, RefreshCw } from 'lucide-react'
+import { Sun, Zap, Loader2, TrendingUp, DollarSign, BookOpen, Bitcoin, Pencil, RefreshCw, Info } from 'lucide-react'
 
 import InputField from '../components/InputField'
 import SelectField from '../components/SelectField'
 import SmartTooltip from '../components/SmartTooltip'
+import DualAxisChart from '../components/DualAxisChart'
+import PdfReportButton from '../components/PdfReportButton'
+import SEO from '../components/SEO'
+import type { SolarMiningReportData, PdfInputCategory, PdfResultItem } from '../pdf/types'
 
 import {
   calculateSolarMining,
   calculateNetMeteringComparison,
-  calculateMaxMiners,
+  calculateMonthlyExcessMining,
   formatBtc,
   formatUsd,
   formatKwh,
@@ -16,11 +20,15 @@ import {
   MINER_PRESETS,
   DEFAULT_CUSTOM_MINER,
   MinerSpec,
-  BTCMetrics,
 } from '../calculations/solar'
 
 import { getSolarEstimate, SolarEstimate } from '../api/solar'
-import { getBraiinsData, BraiinsMetrics } from '../api/bitcoin'
+import {
+  getBraiinsData,
+  BraiinsMetrics,
+  calculateHashvalueSats,
+  calculateImpliedHashrate,
+} from '../api/bitcoin'
 
 // ============================================================================
 // Types
@@ -74,19 +82,21 @@ export default function SolarMonetization() {
   const [braiinsData, setBraiinsData] = useState<BraiinsMetrics | null>(null)
   const [loadingBtc, setLoadingBtc] = useState(true)
 
-  // Manual overrides for scenario exploration (Two-Knob System)
+  // Manual overrides for scenario exploration (Three-Knob System)
   // Knob 1 (Price): BTC Price ↔ Hashprice (editing one implies the other)
-  // Knob 2 (Network): Network Hashrate ↔ Hashvalue (editing one implies the other)
+  // Knob 2 (Network): Fee % is the anchor, Network Hashrate ↔ Hashvalue imply each other
   const [btcPriceOverride, setBtcPriceOverride] = useState<string>('')
   const [hashvalueOverride, setHashvalueOverride] = useState<string>('')
   const [hashpriceOverride, setHashpriceOverride] = useState<string>('')
   const [networkHashrateOverride, setNetworkHashrateOverride] = useState<string>('')
+  const [feeOverride, setFeeOverride] = useState<string>('')
 
   // ============================================================================
   // State - Solar Data
   // ============================================================================
   const [solarEstimate, setSolarEstimate] = useState<SolarEstimate | null>(null)
   const [loadingSolar, setLoadingSolar] = useState(false)
+  const [solarError, setSolarError] = useState<string>('')
 
   // ============================================================================
   // State - User Inputs
@@ -116,8 +126,6 @@ export default function SolarMonetization() {
   const [minerType, setMinerType] = useState('Custom')
   const [minerPower, setMinerPower] = useState('850')
   const [minerHashrate, setMinerHashrate] = useState('40')
-  const [minerQuantity, setMinerQuantity] = useState('')
-  const [quantityOverride, setQuantityOverride] = useState(false)
 
   // ============================================================================
   // Effects - Fetch Bitcoin Data
@@ -142,15 +150,21 @@ export default function SolarMonetization() {
   // ============================================================================
   useEffect(() => {
     async function fetchSolarData() {
-      if (zipCode.length < 5 || inputMode !== 'estimate') return
+      if (zipCode.length < 5 || inputMode !== 'estimate') {
+        setSolarError('')
+        return
+      }
 
       setLoadingSolar(true)
+      setSolarError('')
       try {
         const systemKw = parseFloat(systemSizeKw) || 10
         const estimate = await getSolarEstimate(zipCode, systemKw)
         setSolarEstimate(estimate)
       } catch (error) {
         console.error('Error fetching solar estimate:', error)
+        setSolarEstimate(null)
+        setSolarError('Invalid zip code - please verify and try again')
       } finally {
         setLoadingSolar(false)
       }
@@ -176,7 +190,7 @@ export default function SolarMonetization() {
   }, [minerType])
 
   // ============================================================================
-  // Override Handlers (Two-Knob System)
+  // Override Handlers (Three-Knob System)
   // ============================================================================
 
   // Price group handlers (Knob 1)
@@ -190,20 +204,35 @@ export default function SolarMonetization() {
     setBtcPriceOverride('')   // Clear other in same group
   }
 
-  // Network group handlers (Knob 2)
+  // Network group handlers (Three-Knob System)
+  // Fee % is the anchor - never implied, only explicitly set
+  // When adjusting hashvalue: hold fee %, recalc network hashrate
+  // When adjusting network hashrate: hold fee %, recalc hashvalue
+  const handleFeeOverride = (value: string) => {
+    // Clamp to 0-99
+    const num = parseInt(value)
+    if (value === '' || isNaN(num)) {
+      setFeeOverride('')
+    } else {
+      setFeeOverride(Math.min(99, Math.max(0, num)).toString())
+    }
+    // Fee adjustment holds network hashrate fixed, hashvalue is recalculated
+  }
+
   const handleHashvalueOverride = (value: string) => {
     setHashvalueOverride(value)
-    setNetworkHashrateOverride('')  // Clear other in same group
+    setNetworkHashrateOverride('')  // Hashvalue override implies network hashrate
   }
 
   const handleNetworkHashrateOverride = (value: string) => {
     setNetworkHashrateOverride(value)
-    setHashvalueOverride('')  // Clear other in same group
+    setHashvalueOverride('')  // Network hashrate override implies hashvalue
   }
 
   // Check if user has any overrides active
   const hasOverrides = btcPriceOverride !== '' || hashvalueOverride !== '' ||
-                       hashpriceOverride !== '' || networkHashrateOverride !== ''
+                       hashpriceOverride !== '' || networkHashrateOverride !== '' ||
+                       feeOverride !== ''
 
   // Compensation type handler
   const handleCompensationTypeChange = (type: CompensationType) => {
@@ -212,18 +241,32 @@ export default function SolarMonetization() {
   }
 
   // ============================================================================
-  // Two-Knob Calculation Model
+  // Three-Knob Calculation Model
   // ============================================================================
   // Knob 1 (Price): BTC Price ↔ Hashprice
   //   - hashprice = hashvalue × btcPrice / 1e8
   //   - btcPrice = hashprice × 1e8 / hashvalue
   //
-  // Knob 2 (Network): Network Hashrate ↔ Hashvalue
-  //   - hashvalue = (144 × 3.125 × 1e8) / networkHashrate
-  //   - networkHashrate = (144 × 3.125 × 1e8) / hashvalue
+  // Knob 2 (Network): Fee % is the ANCHOR (never implied)
+  //   - Adjust Fee % → Hold Network Hashrate → Recalc Hashvalue
+  //   - Adjust Hashvalue → Hold Fee % → Recalc Network Hashrate
+  //   - Adjust Network Hashrate → Hold Fee % → Recalc Hashvalue
   // ============================================================================
 
+  // Get block subsidy from API data (auto-halving based on block height)
+  const blockSubsidy = braiinsData?.blockSubsidy ?? 3.125
+
+  // Effective fee % (user override or API value)
+  const effectiveFeePercent = useMemo(() => {
+    if (feeOverride !== '') {
+      const fee = parseInt(feeOverride)
+      if (!isNaN(fee) && fee >= 0 && fee <= 99) return fee
+    }
+    return braiinsData?.feePercent ?? 6
+  }, [feeOverride, braiinsData])
+
   // KNOB 2: Calculate effective network hashrate (Network group)
+  // Three-knob logic: Fee % is anchor, hashvalue and network hashrate imply each other
   const effectiveNetworkHashrate = useMemo(() => {
     if (networkHashrateOverride) {
       const nh = parseFloat(networkHashrateOverride)
@@ -232,34 +275,43 @@ export default function SolarMonetization() {
     if (hashvalueOverride) {
       const hv = parseFloat(hashvalueOverride)
       if (hv > 0) {
-        // Back-calculate: networkHashrate = (144 × 3.125 × 1e8) / hashvalue
-        return (144 * 3.125 * 1e8) / hv
+        // Back-calculate: networkHashrate = daily_reward_sats / hashvalue
+        // Using effectiveFeePercent to calculate total reward
+        return calculateImpliedHashrate(blockSubsidy, effectiveFeePercent, hv)
       }
     }
     return braiinsData?.networkHashrate ?? null
-  }, [networkHashrateOverride, hashvalueOverride, braiinsData])
+  }, [networkHashrateOverride, hashvalueOverride, braiinsData, blockSubsidy, effectiveFeePercent])
 
-  // Calculate effective hashvalue (derived from network hashrate or Braiins API)
+  // Calculate effective hashvalue (derived from network hashrate or API)
   const effectiveHashvalue = useMemo(() => {
     if (hashvalueOverride) {
       const hv = parseFloat(hashvalueOverride)
       if (hv > 0) return hv
     }
-    // If networkHashrate is overridden, recalculate hashvalue for consistency
-    if (networkHashrateOverride) {
-      const nh = parseFloat(networkHashrateOverride)
-      if (nh > 0) return (144 * 3.125 * 1e8) / (nh * 1e6)
+    // If networkHashrate is overridden OR fee is overridden, recalculate hashvalue
+    if (networkHashrateOverride || feeOverride !== '') {
+      const nh = networkHashrateOverride
+        ? parseFloat(networkHashrateOverride) * 1e6
+        : (braiinsData?.networkHashrate ?? null)
+      if (nh && nh > 0) {
+        return calculateHashvalueSats(blockSubsidy, effectiveFeePercent, nh)
+      }
     }
-    // Use Braiins hashvalue directly (includes fees, more accurate)
+    // Use API hashvalue directly (in sats/TH/day)
+    if (braiinsData?.hashvalueSats) {
+      return braiinsData.hashvalueSats
+    }
+    // Legacy fallback: convert from BTC/TH/day to sats
     if (braiinsData?.hashvalue) {
       return braiinsData.hashvalue * 1e8
     }
-    // Fallback: calculate from network hashrate
+    // Final fallback: calculate from network hashrate
     if (effectiveNetworkHashrate && effectiveNetworkHashrate > 0) {
-      return (144 * 3.125 * 1e8) / effectiveNetworkHashrate
+      return calculateHashvalueSats(blockSubsidy, effectiveFeePercent, effectiveNetworkHashrate)
     }
     return null
-  }, [hashvalueOverride, networkHashrateOverride, braiinsData, effectiveNetworkHashrate])
+  }, [hashvalueOverride, networkHashrateOverride, feeOverride, braiinsData, effectiveNetworkHashrate, blockSubsidy, effectiveFeePercent])
 
   // KNOB 1: Calculate effective BTC price (Price group)
   const effectiveBtcPrice = useMemo(() => {
@@ -276,27 +328,24 @@ export default function SolarMonetization() {
     return braiinsData?.btcPrice ?? null
   }, [btcPriceOverride, hashpriceOverride, effectiveHashvalue, braiinsData])
 
-  // Calculate effective hashprice
+  // Calculate effective hashprice (hashprice = hashvalue × btcPrice / 1e8)
+  // Always derive from effective values to stay consistent with network overrides
   const effectiveHashprice = useMemo(() => {
     if (hashpriceOverride) {
       const hp = parseFloat(hashpriceOverride)
       if (hp > 0) return hp
     }
-    // If btcPrice is overridden, recalculate hashprice for consistency
-    if (btcPriceOverride && effectiveHashvalue) {
-      const bp = parseFloat(btcPriceOverride)
-      if (bp > 0) return (effectiveHashvalue * bp) / 1e8
-    }
-    // Use Braiins hashprice directly
-    if (braiinsData?.hashprice) {
-      return braiinsData.hashprice
-    }
-    // Fallback: calculate from btcPrice and hashvalue
+    // Always calculate from effective values when available
+    // This ensures hashprice updates when hashvalue changes due to network overrides
     if (effectiveBtcPrice && effectiveHashvalue) {
       return (effectiveHashvalue * effectiveBtcPrice) / 1e8
     }
+    // Fallback to API hashprice (only when effective values unavailable)
+    if (braiinsData?.hashprice) {
+      return braiinsData.hashprice
+    }
     return null
-  }, [hashpriceOverride, btcPriceOverride, braiinsData, effectiveHashvalue, effectiveBtcPrice])
+  }, [hashpriceOverride, braiinsData, effectiveHashvalue, effectiveBtcPrice])
 
   // Network metrics for display
   const networkMetrics = useMemo(() => {
@@ -319,32 +368,13 @@ export default function SolarMonetization() {
     hashrateTH: parseFloat(minerHashrate) || 40,
   }), [minerType, minerPower, minerHashrate])
 
-  // System size
-  const systemKw = useMemo(() => parseFloat(systemSizeKw) || 10, [systemSizeKw])
+  // Note: Miner quantity removed - calculations now assume 100% solar utilization
 
-  // Max miners calculation
-  const maxMiners = useMemo(() =>
-    calculateMaxMiners(systemKw, miner.powerW),
-    [systemKw, miner.powerW]
-  )
+  // Check if we have required data for calculations
+  const hasRequiredData = effectiveBtcPrice !== null && effectiveHashvalue !== null
 
-  // Actual miner quantity
-  const actualQuantity = useMemo(() => {
-    if (quantityOverride && minerQuantity) {
-      return Math.min(parseInt(minerQuantity) || 1, maxMiners)
-    }
-    return maxMiners
-  }, [quantityOverride, minerQuantity, maxMiners])
-
-  // BTC metrics for calculations (uses effective values with overrides)
-  const btcMetrics: BTCMetrics | null = useMemo(() => {
-    if (effectiveBtcPrice === null || effectiveNetworkHashrate === null) return null
-    return {
-      btcPrice: effectiveBtcPrice,
-      networkHashrate: effectiveNetworkHashrate,
-      blockReward: 3.125,
-    }
-  }, [effectiveBtcPrice, effectiveNetworkHashrate])
+  // Generic seasonal distribution factors (US average)
+  const SEASONAL_FACTORS = [0.060, 0.065, 0.080, 0.090, 0.100, 0.105, 0.105, 0.100, 0.090, 0.080, 0.065, 0.060]
 
   // Monthly production breakdown
   const monthlyKwh = useMemo(() => {
@@ -357,21 +387,20 @@ export default function SolarMonetization() {
       return monthlyProductionInputs.map(v => parseFloat(v) || 0)
     }
 
-    // Annual entry: distribute by location's seasonal profile
+    // Annual entry: distribute by location's production profile or generic seasonal factors
     const annual = parseFloat(annualProductionKwh) || 0
-    if (solarEstimate?.monthlySunHours) {
-      // Use actual sun hours ratio from location
-      const totalSunHours = solarEstimate.monthlySunHours.reduce((a, b) => a + b, 0)
-      if (totalSunHours > 0) {
-        return solarEstimate.monthlySunHours.map(
-          hours => Math.round(annual * (hours / totalSunHours))
+    if (solarEstimate?.monthlyKwh) {
+      // Use NREL's monthly production ratios (already accounts for location)
+      const nrelTotal = solarEstimate.monthlyKwh.reduce((a, b) => a + b, 0)
+      if (nrelTotal > 0) {
+        return solarEstimate.monthlyKwh.map(
+          kwh => Math.round(annual * (kwh / nrelTotal))
         )
       }
     }
 
     // Fallback: generic seasonal factors
-    const monthlyFactors = [0.060, 0.065, 0.080, 0.090, 0.100, 0.105, 0.105, 0.100, 0.090, 0.080, 0.065, 0.060]
-    return monthlyFactors.map(f => Math.round(annual * f))
+    return SEASONAL_FACTORS.map(f => Math.round(annual * f))
   }, [inputMode, solarEstimate, dataEntryMethod, monthlyProductionInputs, annualProductionKwh])
 
   // Annual production (from estimate, monthly sum, or user input)
@@ -395,15 +424,22 @@ export default function SolarMonetization() {
       return monthlyExportInputs.map(v => parseFloat(v) || 0)
     }
 
-    // Annual entry: distribute by location's sun hours or generic seasonal pattern
+    // Annual entry: distribute by location's production profile or generic seasonal factors
     const annualExport = parseFloat(excessKwh) || 0
     if (annualExport === 0) return Array(12).fill(0)
 
-    // Use sun hours for seasonal distribution (solar export correlates with sun hours)
-    const sunHoursPattern = solarEstimate?.monthlySunHours || [3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.0, 5.5, 5.0, 4.5, 3.5, 3.0]
-    const totalSunHours = sunHoursPattern.reduce((a, b) => a + b, 0)
+    // Use NREL's monthly production ratios if available (excess correlates with production)
+    if (solarEstimate?.monthlyKwh) {
+      const nrelTotal = solarEstimate.monthlyKwh.reduce((a, b) => a + b, 0)
+      if (nrelTotal > 0) {
+        return solarEstimate.monthlyKwh.map(
+          kwh => Math.round(annualExport * (kwh / nrelTotal))
+        )
+      }
+    }
 
-    return sunHoursPattern.map(hours => Math.round(annualExport * (hours / totalSunHours)))
+    // Fallback: generic seasonal factors
+    return SEASONAL_FACTORS.map(f => Math.round(annualExport * f))
   }, [inputMode, dataEntryMethod, monthlyExportInputs, excessKwh, solarEstimate])
 
   // Annual export (from monthly sum or user input)
@@ -415,38 +451,22 @@ export default function SolarMonetization() {
     return parseFloat(excessKwh) || 0
   }, [inputMode, dataEntryMethod, monthlyExportKwh, excessKwh])
 
-  // Sun hours
-  const sunHours = useMemo(() => {
-    if (inputMode === 'estimate' && solarEstimate) {
-      return solarEstimate.monthlySunHours
-    }
-    // Default seasonal pattern
-    return [3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.0, 5.5, 5.0, 4.5, 3.5, 3.0]
-  }, [inputMode, solarEstimate])
-
-  // Average sun hours
-  const avgSunHours = useMemo(() => {
-    return sunHours.reduce((a, b) => a + b, 0) / 12
-  }, [sunHours])
-
-  // Main mining results
+  // Main mining results (uses kWh-based formula with hashvalue)
   const miningResult = useMemo(() => {
-    if (!btcMetrics || annualKwh <= 0) return null
+    if (!hasRequiredData || annualKwh <= 0 || !effectiveHashvalue || !effectiveBtcPrice) return null
 
     return calculateSolarMining(
-      systemKw,
       annualKwh,
       monthlyKwh,
-      sunHours,
       miner,
-      actualQuantity,
-      btcMetrics
+      effectiveHashvalue,
+      effectiveBtcPrice
     )
-  }, [btcMetrics, systemKw, annualKwh, monthlyKwh, sunHours, miner, actualQuantity])
+  }, [hasRequiredData, annualKwh, monthlyKwh, miner, effectiveHashvalue, effectiveBtcPrice])
 
   // Net metering comparison (for excess mode)
   const netMeteringResult = useMemo(() => {
-    if (!btcMetrics || inputMode !== 'excess') return null
+    if (!hasRequiredData || inputMode !== 'excess' || !effectiveHashvalue || !effectiveBtcPrice) return null
 
     const rate = parseFloat(netMeteringRate) || 0.08
 
@@ -456,17 +476,341 @@ export default function SolarMonetization() {
       annualExportKwh,
       rate,
       miner,
-      avgSunHours,
-      btcMetrics
+      effectiveHashvalue,
+      effectiveBtcPrice
     )
-  }, [btcMetrics, inputMode, annualExportKwh, netMeteringRate, miner, avgSunHours])
+  }, [hasRequiredData, inputMode, annualExportKwh, netMeteringRate, miner, effectiveHashvalue, effectiveBtcPrice])
+
+  // Monthly mining revenue breakdown (for excess mode chart)
+  const monthlyExcessMiningResult = useMemo(() => {
+    if (!hasRequiredData || inputMode !== 'excess' || !monthlyExportKwh || !effectiveHashvalue || !effectiveBtcPrice) return null
+
+    return calculateMonthlyExcessMining(
+      monthlyExportKwh,
+      miner,
+      effectiveHashvalue,
+      effectiveBtcPrice
+    )
+  }, [hasRequiredData, inputMode, monthlyExportKwh, miner, effectiveHashvalue, effectiveBtcPrice])
+  // ============================================================================
+  // PDF Report Data Generation
+  // ============================================================================
+
+  // PDF Report for potential mode (full mining potential)
+  const pdfPotentialReportData = useMemo((): SolarMiningReportData | null => {
+    if (!miningResult || inputMode === 'excess') return null
+
+    const minerName = minerType === 'Custom'
+      ? 'Custom Miner'
+      : MINER_PRESETS.find(p => p.name === minerType)?.name || minerType
+
+    const location = solarEstimate
+      ? `${solarEstimate.city}, ${solarEstimate.state}`
+      : zipCode || 'Not specified'
+
+    // Determine solar input method
+    const solarInputMethod = inputMode === 'estimate'
+      ? {
+          source: 'nrel_estimate' as const,
+          description: `Estimated from ${systemSizeKw} kW system using NREL PVWatts API based on location (${location})`
+        }
+      : dataEntryMethod === 'monthly'
+        ? {
+            source: 'manual_monthly' as const,
+            description: 'User-provided monthly production breakdown (Jan-Dec)'
+          }
+        : {
+            source: 'manual_annual' as const,
+            description: 'User-provided annual production estimate'
+          }
+
+    // Build input categories with all Bitcoin network data
+    const inputs: PdfInputCategory[] = [
+      {
+        title: 'Bitcoin Network',
+        items: [
+          { label: 'BTC Price', value: `$${effectiveBtcPrice?.toLocaleString() || 'N/A'}` },
+          { label: 'Hashvalue', value: `${networkMetrics?.hashvalue.toFixed(0) || 'N/A'} sats/TH/d` },
+          { label: 'Fee %', value: `${effectiveFeePercent}%` },
+          { label: 'Hashprice', value: `$${effectiveHashprice?.toFixed(4) || 'N/A'}/TH/d` },
+          { label: 'Network Hashrate', value: `${((effectiveNetworkHashrate || 0) / 1e6).toFixed(0)} EH/s` },
+        ],
+      },
+      {
+        title: 'Solar System',
+        items: [
+          { label: 'Location', value: location },
+          { label: 'System Size', value: `${systemSizeKw} kW` },
+          { label: 'Annual Production', value: `${Math.round(annualKwh).toLocaleString()} kWh` },
+          { label: 'Monthly Average', value: `${Math.round(annualKwh / 12).toLocaleString()} kWh` },
+          { label: 'Data Source', value: solarInputMethod.source === 'nrel_estimate' ? 'NREL PVWatts Estimate' : solarInputMethod.source === 'manual_monthly' ? 'Manual (Monthly)' : 'Manual (Annual)' },
+        ],
+      },
+      {
+        title: 'Mining Setup',
+        items: [
+          { label: 'Miner Model', value: minerName },
+          { label: 'Miner Specs', value: `${miner.hashrateTH.toFixed(1)} TH/s @ ${miner.powerW}W` },
+          { label: 'Efficiency', value: `${(miner.powerW / miner.hashrateTH).toFixed(1)} J/TH` },
+        ],
+      },
+    ]
+
+    const annualSats = Math.round(miningResult.annualBtc * 1e8)
+    const monthlyAvgSats = Math.round(annualSats / 12)
+
+    // Build results
+    const results: PdfResultItem[] = [
+      {
+        label: 'Annual BTC Earnings',
+        value: formatBtc(miningResult.annualBtc),
+        explanation: 'Total bitcoin mined annually using your solar power. This projection assumes current network conditions remain constant. Actual earnings will vary as network difficulty adjusts approximately every 2 weeks.',
+        subValue: `${annualSats.toLocaleString()} sats`,
+      },
+      {
+        label: 'Annual Revenue (USD)',
+        value: formatUsd(miningResult.annualUsd),
+        explanation: 'Dollar value of mined bitcoin at today\'s price. Actual USD value depends on market conditions when you sell.',
+      },
+      {
+        label: 'Monthly Average',
+        value: formatUsd(miningResult.monthlyUsd),
+        explanation: 'Average monthly revenue. Actual monthly earnings vary with seasonal solar production—summer months typically produce 40-60% more than winter.',
+        subValue: `${monthlyAvgSats.toLocaleString()} sats`,
+      },
+      {
+        label: 'Revenue per kWh',
+        value: `$${miningResult.effectiveRevenuePerKwh.toFixed(3)}`,
+        explanation: 'Effective value per kWh of solar electricity via mining. Compare to net metering rates to evaluate best monetization strategy.',
+        subValue: `${miningResult.btcPerKwh.toFixed(0)} sats/kWh`,
+      },
+    ]
+
+    // Monthly dual-axis chart data
+    const monthlyChart = {
+      title: 'Monthly Revenue & Solar Generation',
+      bars: miningResult.monthlyUsdBreakdown.map((usd, i) => ({
+        label: getMonthName(i),
+        value: usd,
+        valueSats: Math.round(miningResult.monthlyBtcBreakdown[i] * 1e8),
+      })),
+      lineData: miningResult.monthlyProductionKwh,
+      barLabel: 'Mining Revenue',
+      barUnit: '$',
+      lineLabel: 'Solar Generation',
+      lineUnit: 'kWh',
+      caption: 'Revenue varies with seasonal solar production. Analysis assumes constant BTC price and network conditions.',
+    }
+
+    return {
+      mode: 'potential',
+      generatedDate: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
+      location,
+      keyMetrics: {
+        annualBtc: formatBtc(miningResult.annualBtc),
+        annualSats: `${annualSats.toLocaleString()} sats`,
+        monthlyAvgSats: `${monthlyAvgSats.toLocaleString()} sats/mo`,
+        annualRevenue: formatUsd(miningResult.annualUsd),
+        annualProductionKwh: `${Math.round(annualKwh).toLocaleString()} kWh`,
+        monthlyAvgProductionKwh: `${Math.round(annualKwh / 12).toLocaleString()} kWh/mo`,
+      },
+      summaryText: `Your ${Math.round(annualKwh).toLocaleString()} kWh solar system could mine ${formatBtc(miningResult.annualBtc)} (${formatUsd(miningResult.annualUsd)}) annually at current network conditions.`,
+      solarInputMethod,
+      analysisType: {
+        type: 'total_potential',
+      },
+      inputs,
+      results,
+      monthlyChart,
+    }
+  }, [miningResult, inputMode, minerType, solarEstimate, zipCode, effectiveBtcPrice, effectiveHashprice, effectiveNetworkHashrate, systemSizeKw, annualKwh, miner, dataEntryMethod, networkMetrics, effectiveFeePercent])
+
+  // PDF Report for comparison mode (mining vs net metering)
+  const pdfComparisonReportData = useMemo((): SolarMiningReportData | null => {
+    if (!netMeteringResult || inputMode !== 'excess') return null
+
+    const minerName = minerType === 'Custom'
+      ? 'Custom Miner'
+      : MINER_PRESETS.find(p => p.name === minerType)?.name || minerType
+
+    const location = solarEstimate
+      ? `${solarEstimate.city}, ${solarEstimate.state}`
+      : zipCode || 'Not specified'
+
+    const compType = COMPENSATION_TYPES[compensationType]
+
+    // Determine solar input method for excess mode
+    const solarInputMethod = dataEntryMethod === 'monthly'
+      ? {
+          source: 'manual_monthly' as const,
+          description: 'User-provided monthly excess energy breakdown (Jan-Dec)'
+        }
+      : {
+          source: 'manual_annual' as const,
+          description: 'User-provided annual excess energy estimate'
+        }
+
+    const annualSats = Math.round(netMeteringResult.miningBtc * 1e8)
+    const monthlyAvgSats = Math.round(annualSats / 12)
+
+    // Build input categories with all Bitcoin network data
+    const inputs: PdfInputCategory[] = [
+      {
+        title: 'Bitcoin Network',
+        items: [
+          { label: 'BTC Price', value: `$${effectiveBtcPrice?.toLocaleString() || 'N/A'}` },
+          { label: 'Hashvalue', value: `${networkMetrics?.hashvalue.toFixed(0) || 'N/A'} sats/TH/d` },
+          { label: 'Fee %', value: `${effectiveFeePercent}%` },
+          { label: 'Hashprice', value: `$${effectiveHashprice?.toFixed(4) || 'N/A'}/TH/d` },
+          { label: 'Network Hashrate', value: `${((effectiveNetworkHashrate || 0) / 1e6).toFixed(0)} EH/s` },
+        ],
+      },
+      {
+        title: 'Excess Solar Energy',
+        items: [
+          { label: 'Location', value: location },
+          { label: 'Annual Excess', value: `${annualExportKwh.toLocaleString()} kWh` },
+          { label: 'Monthly Average', value: `${Math.round(annualExportKwh / 12).toLocaleString()} kWh` },
+          { label: 'Data Entry', value: dataEntryMethod === 'monthly' ? 'Monthly Breakdown' : 'Annual Estimate' },
+        ],
+      },
+      {
+        title: 'Utility Compensation',
+        items: [
+          { label: 'Type', value: compType.label },
+          { label: 'Rate', value: `$${netMeteringRate}/kWh` },
+          { label: 'Description', value: compType.shortDesc },
+        ],
+      },
+      {
+        title: 'Mining Setup',
+        items: [
+          { label: 'Miner Model', value: minerName },
+          { label: 'Miner Specs', value: `${minerHashrate} TH/s @ ${minerPower}W` },
+          { label: 'Efficiency', value: `${(parseFloat(minerPower) / parseFloat(minerHashrate)).toFixed(1)} J/TH` },
+        ],
+      },
+    ]
+
+    // Build results
+    const results: PdfResultItem[] = [
+      {
+        label: `${compType.label} Value`,
+        value: formatUsd(netMeteringResult.netMeteringRevenue),
+        explanation: `Annual value of excess solar at $${netMeteringRate}/kWh via ${compType.label.toLowerCase()}. This is your baseline utility compensation.`,
+      },
+      {
+        label: 'Mining Revenue',
+        value: formatUsd(netMeteringResult.miningRevenue),
+        explanation: 'Annual mining revenue from excess solar at current BTC price and network conditions.',
+        subValue: `${formatBtc(netMeteringResult.miningBtc)} (${annualSats.toLocaleString()} sats)`,
+      },
+      {
+        label: netMeteringResult.recommendMining ? 'Mining Advantage' : 'Net Metering Advantage',
+        value: `${netMeteringResult.recommendMining ? '+' : '-'}${formatUsd(Math.abs(netMeteringResult.advantageUsd))}`,
+        explanation: netMeteringResult.recommendMining
+          ? 'Additional revenue from mining vs utility compensation. This advantage varies with market conditions.'
+          : 'Additional value from utility compensation vs mining at current conditions.',
+      },
+      {
+        label: 'Multiplier',
+        value: `${netMeteringResult.advantageMultiplier.toFixed(1)}x`,
+        explanation: netMeteringResult.recommendMining
+          ? `Mining earns ${netMeteringResult.advantageMultiplier.toFixed(1)}x more than ${compType.label.toLowerCase()}.`
+          : `${compType.label} earns ${(1 / netMeteringResult.advantageMultiplier).toFixed(1)}x more than mining.`,
+      },
+      {
+        label: 'Mining $/kWh',
+        value: `$${(netMeteringResult.miningRevenue / netMeteringResult.excessKwh).toFixed(3)}`,
+        explanation: `Effective mining value per kWh. Compare to your ${compType.label.toLowerCase()} rate of $${netMeteringRate}/kWh.`,
+      },
+    ]
+
+    // Monthly dual-axis chart data (if monthly breakdown available)
+    const monthlyChart = monthlyExcessMiningResult && monthlyExportKwh ? {
+      title: 'Monthly Mining Revenue & Excess Generation',
+      bars: monthlyExcessMiningResult.monthlyUsd.map((usd, i) => ({
+        label: getMonthName(i),
+        value: usd,
+        valueSats: Math.round(monthlyExcessMiningResult.monthlyBtc[i] * 1e8),
+      })),
+      lineData: monthlyExportKwh,
+      barLabel: 'Mining Revenue',
+      barUnit: '$',
+      lineLabel: 'Excess Energy',
+      lineUnit: 'kWh',
+      caption: 'Monthly mining revenue from excess solar. Analysis assumes constant BTC price and network conditions.',
+    } : undefined
+
+    return {
+      mode: 'comparison',
+      generatedDate: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
+      location,
+      keyMetrics: {
+        annualBtc: formatBtc(netMeteringResult.miningBtc),
+        annualSats: `${annualSats.toLocaleString()} sats`,
+        monthlyAvgSats: `${monthlyAvgSats.toLocaleString()} sats/mo`,
+        annualRevenue: formatUsd(netMeteringResult.miningRevenue),
+        annualProductionKwh: `${Math.round(annualExportKwh).toLocaleString()} kWh`,
+        monthlyAvgProductionKwh: `${Math.round(annualExportKwh / 12).toLocaleString()} kWh/mo`,
+      },
+      summaryText: netMeteringResult.recommendMining
+        ? `Mining excess solar earns ${formatUsd(netMeteringResult.advantageUsd)}/year more than ${compType.label.toLowerCase()}.`
+        : `${compType.label} provides ${formatUsd(Math.abs(netMeteringResult.advantageUsd))}/year more than mining.`,
+      solarInputMethod,
+      analysisType: {
+        type: 'excess_comparison',
+        compensationType: compType.label,
+        compensationRate: `$${netMeteringRate}/kWh`,
+      },
+      inputs,
+      results,
+      monthlyChart,
+      comparison: {
+        netMeteringValue: netMeteringResult.netMeteringRevenue,
+        miningRevenue: netMeteringResult.miningRevenue,
+        advantage: netMeteringResult.advantageUsd,
+        advantageMultiplier: netMeteringResult.advantageMultiplier,
+        recommendMining: netMeteringResult.recommendMining,
+        compensationType: compType.label,
+      },
+    }
+  }, [netMeteringResult, inputMode, minerType, solarEstimate, zipCode, effectiveBtcPrice, effectiveHashprice, effectiveNetworkHashrate, annualExportKwh, compensationType, netMeteringRate, minerPower, minerHashrate, dataEntryMethod, networkMetrics, effectiveFeePercent, monthlyExcessMiningResult, monthlyExportKwh])
 
   // ============================================================================
   // Render
   // ============================================================================
 
+  const structuredData = {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: 'Solar Bitcoin Mining Calculator',
+    applicationCategory: 'FinanceApplication',
+    description: 'Calculate bitcoin mining revenue from your solar PV system. Compare mining profitability vs traditional net metering compensation.',
+    offers: {
+      '@type': 'Offer',
+      price: '0',
+      priceCurrency: 'USD',
+    },
+    featureList: [
+      'Estimate mining revenue from solar production',
+      'Compare mining vs net metering returns',
+      'Location-based solar production estimates',
+      'Real-time Bitcoin network data',
+      'Customizable miner specifications',
+    ],
+  }
+
   return (
     <div className="space-y-6">
+      <SEO
+        title="Solar Bitcoin Mining Calculator"
+        description="Calculate bitcoin mining revenue from your solar PV system. Compare mining profitability vs traditional net metering with real-time BTC network data and location-specific solar estimates."
+        keywords="solar bitcoin mining, net metering calculator, solar mining profitability, bitcoin mining revenue, solar monetization, PV mining calculator"
+        canonical="/solar"
+        structuredData={structuredData}
+      />
+
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
         <div>
@@ -486,7 +830,7 @@ export default function SolarMonetization() {
         </a>
       </div>
 
-      {/* Bitcoin Network Data Header (Two-Knob System) */}
+      {/* Bitcoin Network Data Header (Three-Knob System) */}
       <div className="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-3 sm:p-4 shadow-lg">
         {loadingBtc ? (
           <div className="flex items-center justify-center gap-2 py-4">
@@ -508,6 +852,7 @@ export default function SolarMonetization() {
                     setHashvalueOverride('')
                     setHashpriceOverride('')
                     setNetworkHashrateOverride('')
+                    setFeeOverride('')
                   }}
                   className="flex items-center gap-1 sm:gap-1.5 text-[10px] sm:text-xs text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 font-medium px-1.5 sm:px-2 py-1 rounded hover:bg-primary-50 dark:hover:bg-primary-900/30 transition-colors"
                 >
@@ -518,7 +863,7 @@ export default function SolarMonetization() {
               )}
             </div>
 
-            {/* Two-knob layout: Price group | Network group */}
+            {/* Three-knob layout: Price group | Network group (with Fee % slider) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4">
               {/* KNOB 1: Price Group (BTC Price ↔ Hashprice) */}
               <div className="rounded-lg border border-green-200 dark:border-green-800/50 bg-green-50/30 dark:bg-green-900/10 p-2 sm:p-3">
@@ -584,12 +929,48 @@ export default function SolarMonetization() {
                 </div>
               </div>
 
-              {/* KNOB 2: Network Group (Hashvalue ↔ Network Hashrate) */}
+              {/* KNOB 2: Network Group (Fee % anchor, Hashvalue ↔ Network Hashrate) */}
               <div className="rounded-lg border border-orange-200 dark:border-orange-800/50 bg-orange-50/30 dark:bg-orange-900/10 p-2 sm:p-3">
                 <div className="text-[8px] sm:text-[9px] text-orange-600 dark:text-orange-400 uppercase tracking-wider font-semibold mb-1.5 sm:mb-2 text-center">
                   Mining Network
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-2">
+                  {/* Fee % - Slider + Input (ANCHOR - never implied) */}
+                  <div className={`rounded-lg p-2 sm:p-3 text-center transition-all ${
+                    feeOverride !== ''
+                      ? 'bg-orange-100 dark:bg-orange-900/30 border-2 border-orange-400 dark:border-orange-600'
+                      : 'bg-white dark:bg-surface-800 border-2 border-dashed border-orange-300 dark:border-orange-700 hover:border-orange-400 dark:hover:border-orange-500'
+                  }`}>
+                    <div className="text-[9px] sm:text-[10px] text-surface-500 dark:text-surface-400 uppercase tracking-wider mb-0.5 sm:mb-1 flex items-center justify-center gap-1">
+                      <Pencil className={`w-2 h-2 sm:w-2.5 sm:h-2.5 ${feeOverride !== '' ? 'text-orange-600 dark:text-orange-400' : 'text-surface-400 dark:text-surface-500'}`} />
+                      Fee %
+                    </div>
+                    <div className="flex flex-col items-center gap-1">
+                      <input
+                        type="range"
+                        min="0"
+                        max="99"
+                        step="1"
+                        value={feeOverride !== '' ? parseInt(feeOverride) : effectiveFeePercent}
+                        onChange={(e) => handleFeeOverride(e.target.value)}
+                        className="w-full h-1.5 sm:h-2 bg-orange-200 dark:bg-orange-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                      />
+                      <div className="flex items-center gap-0.5">
+                        <input
+                          type="number"
+                          min="0"
+                          max="99"
+                          value={feeOverride !== '' ? feeOverride : effectiveFeePercent}
+                          onChange={(e) => handleFeeOverride(e.target.value)}
+                          className={`w-10 sm:w-12 text-base sm:text-xl font-bold text-center py-0.5 bg-transparent focus:outline-none ${
+                            feeOverride !== '' ? 'text-orange-700 dark:text-orange-400' : 'text-orange-600 dark:text-orange-400'
+                          }`}
+                        />
+                        <span className="text-[9px] sm:text-xs text-surface-500 dark:text-surface-400">%</span>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Hashvalue - Editable */}
                   <div className={`rounded-lg p-2 sm:p-3 text-center transition-all ${
                     hashvalueOverride
@@ -599,7 +980,7 @@ export default function SolarMonetization() {
                     <div className="text-[9px] sm:text-[10px] text-surface-500 dark:text-surface-400 uppercase tracking-wider mb-0.5 sm:mb-1 flex items-center justify-center gap-1">
                       <Pencil className={`w-2 h-2 sm:w-2.5 sm:h-2.5 ${hashvalueOverride ? 'text-orange-600 dark:text-orange-400' : 'text-surface-400 dark:text-surface-500'}`} />
                       Hashvalue
-                      {networkHashrateOverride && !hashvalueOverride && (
+                      {(networkHashrateOverride || feeOverride !== '') && !hashvalueOverride && (
                         <span className="text-orange-600 dark:text-orange-400">(implied)</span>
                       )}
                     </div>
@@ -816,6 +1197,7 @@ export default function SolarMonetization() {
             onChange={setZipCode}
             placeholder="e.g., 85001"
             helpText={solarEstimate ? `${solarEstimate.city}, ${solarEstimate.state}` : undefined}
+            tooltip="US zip code for your installation. We use NREL PVWatts solar data for your location to estimate production."
           />
 
           {/* System Size */}
@@ -826,6 +1208,7 @@ export default function SolarMonetization() {
             onChange={setSystemSizeKw}
             suffix="kW"
             helpText={`${(parseFloat(systemSizeKw) || 0) * 1000}W peak`}
+            tooltip="Peak DC capacity in kW. Find this on your solar panel installation paperwork or inverter specs. Typical residential systems are 5-10 kW."
           />
 
           {/* Annual Production (only for production mode with annual entry) */}
@@ -835,7 +1218,7 @@ export default function SolarMonetization() {
                 <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
                   Annual Production
                 </label>
-                <SmartTooltip content="Find this on your solar monitoring app (Enphase, SolarEdge, etc.) or your utility bill under 'Solar Generation' or 'Customer Generation'." />
+                <SmartTooltip content="Total kWh generated in one year. Find this on your solar monitoring app (Enphase, SolarEdge, etc.) or utility bill under 'Solar Generation' or 'Customer Generation'." />
               </div>
               <InputField
                 label=""
@@ -855,7 +1238,7 @@ export default function SolarMonetization() {
                 <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
                   Annual Grid Export
                 </label>
-                <SmartTooltip content="Look for 'Energy Delivered to Grid', 'Net Export', or 'Excess Generation' on your utility bill. Some bills show this as negative kWh." />
+                <SmartTooltip content="Total kWh sent to grid annually. Look for 'Energy Delivered to Grid', 'Net Export', or 'Excess Generation' on your utility bill. Some bills show this as negative kWh." />
               </div>
               <InputField
                 label=""
@@ -909,7 +1292,7 @@ export default function SolarMonetization() {
                 <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
                   Your Rate
                 </label>
-                <SmartTooltip content="Find this on your utility bill under 'Export Credit Rate', 'Net Metering Rate', or 'Avoided Cost'. Contact your utility if you're unsure of your exact rate." />
+                <SmartTooltip content="Your actual export compensation rate. Find this on your utility bill under 'Export Credit Rate', 'Net Metering Rate', or 'Avoided Cost'. Contact your utility if you're unsure of your exact rate." />
               </div>
               <InputField
                 label=""
@@ -930,7 +1313,7 @@ export default function SolarMonetization() {
               <h4 className="text-sm font-medium text-surface-700 dark:text-surface-300">
                 Production by Month (kWh)
               </h4>
-              <SmartTooltip content="Find this on your solar monitoring app (Enphase, SolarEdge, etc.) or your utility bill under 'Solar Generation' or 'Customer Generation'." />
+              <SmartTooltip content="Monthly generation in kWh. Find this on your solar monitoring app (Enphase, SolarEdge, etc.) or utility bill under 'Solar Generation' or 'Customer Generation'." />
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
               {monthlyProductionInputs.map((value, index) => (
@@ -1007,6 +1390,7 @@ export default function SolarMonetization() {
                 { value: 'Custom', label: 'Custom' },
                 ...MINER_PRESETS.map(m => ({ value: m.name, label: m.name })),
               ]}
+              tooltip="Choose your miner model or enter custom specs. More efficient miners (lower W/TH) earn more BTC per kWh of solar energy."
             />
             <InputField
               label="Power"
@@ -1022,77 +1406,81 @@ export default function SolarMonetization() {
               onChange={setMinerHashrate}
               suffix="TH/s"
             />
-            <div>
-              <div className="flex items-center gap-2 mb-1">
+            {/* Efficiency Display Card */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1">
                 <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
-                  Quantity
+                  Efficiency
                 </label>
-                <span className="text-xs text-surface-500">(max {maxMiners})</span>
-                <SmartTooltip content={`Max: ${maxMiners} miners (based on ${systemKw}kW system)`} />
+                <SmartTooltip content="Miner efficiency measured in watts per terahash. Lower is better - more efficient miners extract more BTC value per kWh of solar energy consumed." />
               </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={quantityOverride}
-                  onChange={(e) => setQuantityOverride(e.target.checked)}
-                  className="rounded border-surface-300 text-primary-500 focus:ring-primary-500"
-                />
-                <input
-                  type="number"
-                  value={quantityOverride ? minerQuantity : maxMiners.toString()}
-                  onChange={(e) => setMinerQuantity(e.target.value)}
-                  disabled={!quantityOverride}
-                  min="1"
-                  max={maxMiners}
-                  className={`w-full px-3 py-2 rounded-lg border ${
-                    quantityOverride
-                      ? 'border-surface-300 dark:border-surface-600 bg-white dark:bg-surface-700'
-                      : 'border-surface-200 dark:border-surface-700 bg-surface-100 dark:bg-surface-800'
-                  } text-surface-900 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-primary-500`}
-                />
+              <div className="h-[42px] px-3 flex items-center justify-between rounded-lg border border-surface-300 dark:border-surface-600 bg-surface-50 dark:bg-surface-700/50">
+                <span className="text-surface-900 dark:text-surface-100 font-medium">
+                  {miner.hashrateTH > 0 ? (miner.powerW / miner.hashrateTH).toFixed(1) : '—'}
+                </span>
+                <span className="text-surface-500 dark:text-surface-400 text-sm">W/TH</span>
               </div>
-              <p className="text-xs text-surface-500 mt-1">
-                {quantityOverride ? 'Custom quantity' : 'Auto (max capacity)'}
-              </p>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Results Section - Full Mining Potential (Estimate/Production modes only) */}
+      {/* Error Messages */}
+      {solarError && (
+        <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl p-4 text-red-700 dark:text-red-300">
+          <div className="flex items-start gap-2">
+            <Info className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium">Error</p>
+              <p className="text-sm mt-1">{solarError}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Validation Guidance */}
+      {inputMode !== 'estimate' && annualKwh === 0 && !loadingSolar && (
+        <div className="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-xl p-4 text-blue-700 dark:text-blue-300">
+          <div className="flex items-start gap-2">
+            <Info className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium">Tip</p>
+              <p className="text-sm mt-1">For production estimates, try the 'Estimate from system size' mode instead</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Results Section - Mining Analysis (non-excess modes only) */}
       {miningResult && inputMode !== 'excess' && (
-        <div className="space-y-4">
-          <h2 className="text-xl font-semibold text-surface-900 dark:text-surface-100">
-            Total Solar Mining Potential
-          </h2>
+        <div id="solar-mining-results" className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-surface-900 dark:text-surface-100">
+              Total Solar Mining Potential
+            </h2>
+            <PdfReportButton
+              reportType="solar"
+              reportData={pdfPotentialReportData}
+              filename="solar-mining-potential.pdf"
+            />
+          </div>
 
           {/* Main Metrics Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {/* Solar Production */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Solar Production / Export */}
             <div className="bg-white dark:bg-surface-800 rounded-xl p-4 shadow-lg">
               <div className="flex items-center gap-2 mb-2">
                 <Sun className="w-5 h-5 text-yellow-500" />
-                <span className="text-sm text-surface-500 dark:text-surface-400">Annual Production</span>
+                <span className="text-sm text-surface-500 dark:text-surface-400">
+                  Annual Production
+                </span>
+                <SmartTooltip content="Total solar energy available for mining. Based on your location's sun hours and system size. Higher sun hours mean more mining opportunity." />
               </div>
               <div className="text-2xl font-bold text-surface-900 dark:text-surface-100">
                 {formatKwh(miningResult.annualProductionKwh)}
               </div>
               <p className="text-sm text-surface-500 mt-1">
-                {miningResult.avgSunHoursPerDay.toFixed(1)} avg sun hours/day
-              </p>
-            </div>
-
-            {/* Mining Capacity */}
-            <div className="bg-white dark:bg-surface-800 rounded-xl p-4 shadow-lg">
-              <div className="flex items-center gap-2 mb-2">
-                <Bolt className="w-5 h-5 text-orange-500" />
-                <span className="text-sm text-surface-500 dark:text-surface-400">Mining Capacity</span>
-              </div>
-              <div className="text-2xl font-bold text-surface-900 dark:text-surface-100">
-                {miningResult.actualMiners}x {miner.name}
-              </div>
-              <p className="text-sm text-surface-500 mt-1">
-                {(miningResult.totalPowerW / 1000).toFixed(1)}kW / {miningResult.totalHashrateTH.toFixed(0)} TH/s
+                {miner.hashrateTH > 0 ? `${(miner.powerW / miner.hashrateTH).toFixed(1)} J/TH efficiency` : 'N/A'}
               </p>
             </div>
 
@@ -1101,6 +1489,7 @@ export default function SolarMonetization() {
               <div className="flex items-center gap-2 mb-2">
                 <Bitcoin className="w-5 h-5 text-orange-500" />
                 <span className="text-sm text-surface-500 dark:text-surface-400">Annual BTC Earnings</span>
+                <SmartTooltip content="Total bitcoin mined annually using your solar power. Calculated from your hashrate (based on miner efficiency) and solar production hours. Assumes static BTC price and network conditions - actual earnings depend on BTC price when you sell and network difficulty changes over time. Does not account for future volatility." />
               </div>
               <div className="text-2xl font-bold text-surface-900 dark:text-surface-100">
                 {formatBtc(miningResult.annualBtc)}
@@ -1115,6 +1504,7 @@ export default function SolarMonetization() {
               <div className="flex items-center gap-2 mb-2">
                 <TrendingUp className="w-5 h-5 text-primary-500" />
                 <span className="text-sm text-surface-500 dark:text-surface-400">Monthly Average</span>
+                <SmartTooltip content="Average monthly mining revenue. Summer months typically earn more due to longer sun hours. Remember this assumes current BTC price and network conditions throughout the year." />
               </div>
               <div className="text-2xl font-bold text-surface-900 dark:text-surface-100">
                 {formatBtc(miningResult.monthlyBtc)}
@@ -1129,6 +1519,7 @@ export default function SolarMonetization() {
               <div className="flex items-center gap-2 mb-2">
                 <DollarSign className="w-5 h-5 text-green-500" />
                 <span className="text-sm text-surface-500 dark:text-surface-400">Revenue per kWh</span>
+                <SmartTooltip content="How much value you extract from each kWh of solar power via mining. Compare this to your utility's net metering rate to see relative value. Higher miner efficiency = higher revenue per kWh." />
               </div>
               <div className="text-2xl font-bold text-surface-900 dark:text-surface-100">
                 ${miningResult.effectiveRevenuePerKwh.toFixed(3)}
@@ -1137,59 +1528,36 @@ export default function SolarMonetization() {
                 {miningResult.btcPerKwh.toFixed(0)} sats/kWh
               </p>
             </div>
-
-            {/* Utilization */}
-            <div className="bg-white dark:bg-surface-800 rounded-xl p-4 shadow-lg">
-              <div className="flex items-center gap-2 mb-2">
-                <Zap className="w-5 h-5 text-yellow-500" />
-                <span className="text-sm text-surface-500 dark:text-surface-400">Solar Utilization</span>
-              </div>
-              <div className="text-2xl font-bold text-surface-900 dark:text-surface-100">
-                {miningResult.utilizationPercent.toFixed(0)}%
-              </div>
-              <p className="text-sm text-surface-500 mt-1">
-                of {systemKw}kW system capacity
-              </p>
-            </div>
           </div>
 
           {/* Monthly Breakdown Chart */}
           <div className="bg-white dark:bg-surface-800 rounded-xl p-4 sm:p-6 shadow-lg">
             <h3 className="text-lg font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              Monthly Revenue Breakdown
+              Monthly Revenue & Generation
             </h3>
-            <div className="overflow-x-auto">
-              <div className="flex gap-2 min-w-[600px]">
-                {miningResult.monthlyUsdBreakdown.map((usd, i) => {
-                  const maxUsd = Math.max(...miningResult.monthlyUsdBreakdown)
-                  const heightPercent = maxUsd > 0 ? (usd / maxUsd) * 100 : 0
-                  return (
-                    <div key={i} className="flex-1 flex flex-col items-center">
-                      <div className="w-full h-32 flex items-end">
-                        <div
-                          className="w-full bg-primary-500 dark:bg-primary-400 rounded-t"
-                          style={{ height: `${heightPercent}%` }}
-                        />
-                      </div>
-                      <div className="text-xs text-surface-500 mt-1">{getMonthName(i)}</div>
-                      <div className="text-xs font-medium text-surface-700 dark:text-surface-300">
-                        ${usd.toFixed(0)}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
+            <DualAxisChart
+              revenueData={miningResult.monthlyUsdBreakdown}
+              revenueDataSats={miningResult.monthlyBtcBreakdown.map(btc => btc * 1e8)}
+              generationData={miningResult.monthlyProductionKwh}
+              monthLabels={Array.from({ length: 12 }, (_, i) => getMonthName(i))}
+            />
           </div>
         </div>
       )}
 
       {/* Results Section - Net Metering Comparison (Excess mode only) */}
       {netMeteringResult && inputMode === 'excess' && (
-        <div className="space-y-4">
-          <h2 className="text-xl font-semibold text-surface-900 dark:text-surface-100">
-            Mining vs Net Metering Comparison
-          </h2>
+        <div id="solar-comparison-results" className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-surface-900 dark:text-surface-100">
+              Mining vs Net Metering Comparison
+            </h2>
+            <PdfReportButton
+              reportType="solar"
+              reportData={pdfComparisonReportData}
+              filename="solar-net-metering-comparison.pdf"
+            />
+          </div>
 
           <div className="bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 rounded-xl p-6 shadow-lg border border-green-200 dark:border-green-800">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
@@ -1248,28 +1616,20 @@ export default function SolarMonetization() {
             )}
           </div>
 
-          {/* Mining Details Card */}
-          <div className="bg-white dark:bg-surface-800 rounded-xl p-4 shadow-lg">
-            <h3 className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-3">Mining Setup Details</h3>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-              <div>
-                <div className="text-surface-500 dark:text-surface-400">Miner</div>
-                <div className="font-medium text-surface-900 dark:text-surface-100">{miner.name}</div>
-              </div>
-              <div>
-                <div className="text-surface-500 dark:text-surface-400">Power</div>
-                <div className="font-medium text-surface-900 dark:text-surface-100">{miner.powerW}W</div>
-              </div>
-              <div>
-                <div className="text-surface-500 dark:text-surface-400">Hashrate</div>
-                <div className="font-medium text-surface-900 dark:text-surface-100">{miner.hashrateTH} TH/s</div>
-              </div>
-              <div>
-                <div className="text-surface-500 dark:text-surface-400">Avg Sun Hours</div>
-                <div className="font-medium text-surface-900 dark:text-surface-100">{avgSunHours.toFixed(1)} hrs/day</div>
-              </div>
+          {/* Monthly Breakdown Chart (Excess Mode) */}
+          {monthlyExcessMiningResult && monthlyExportKwh && (
+            <div className="bg-white dark:bg-surface-800 rounded-xl p-4 sm:p-6 shadow-lg">
+              <h3 className="text-lg font-semibold text-surface-900 dark:text-surface-100 mb-4">
+                Monthly Revenue & Generation
+              </h3>
+              <DualAxisChart
+                revenueData={monthlyExcessMiningResult.monthlyUsd}
+                revenueDataSats={monthlyExcessMiningResult.monthlyBtc.map(btc => btc * 1e8)}
+                generationData={monthlyExportKwh}
+                monthLabels={Array.from({ length: 12 }, (_, i) => getMonthName(i))}
+              />
             </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -1278,20 +1638,6 @@ export default function SolarMonetization() {
         <div className="flex items-center justify-center gap-2 text-surface-500 py-8">
           <Loader2 className="w-5 h-5 animate-spin" />
           <span>Fetching solar data for {zipCode}...</span>
-        </div>
-      )}
-
-      {/* Empty State - Different for each mode */}
-      {inputMode !== 'excess' && !miningResult && !loadingSolar && (
-        <div className="text-center py-8 text-surface-500">
-          <Sun className="w-12 h-12 mx-auto mb-3 opacity-50" />
-          <p>Enter your zip code and system size to see solar mining potential.</p>
-        </div>
-      )}
-      {inputMode === 'excess' && !netMeteringResult && !loadingSolar && (
-        <div className="text-center py-8 text-surface-500">
-          <Zap className="w-12 h-12 mx-auto mb-3 opacity-50" />
-          <p>Enter your grid export data to compare mining vs net metering.</p>
         </div>
       )}
     </div>
