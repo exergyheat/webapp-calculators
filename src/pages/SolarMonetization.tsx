@@ -6,6 +6,7 @@ import SelectField from '../components/SelectField'
 import SmartTooltip from '../components/SmartTooltip'
 import DualAxisChart from '../components/DualAxisChart'
 import PdfReportButton from '../components/PdfReportButton'
+import Phase0Cta from '../components/Phase0Cta'
 import SEO from '../components/SEO'
 import type { SolarMiningReportData, PdfInputCategory, PdfResultItem } from '../pdf/types'
 
@@ -1631,6 +1632,10 @@ export default function SolarMonetization() {
             </div>
           )}
         </div>
+      )}
+
+      {((miningResult && inputMode !== 'excess') || (netMeteringResult && inputMode === 'excess')) && (
+        <Phase0Cta />
       )}
 
       {/* Loading State */}

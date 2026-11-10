@@ -338,4 +338,9 @@ describe('MINER_PRESETS', () => {
     const heatbitMiners = MINER_PRESETS.filter(m => m.name.includes('Heatbit'))
     expect(heatbitMiners.length).toBeGreaterThanOrEqual(2)
   })
+
+  it('should include the Whatsminer M64 preset', () => {
+    expect(MINER_PRESETS.some(m => m.name === 'Whatsminer M64')).toBe(true)
+    expect(MINER_PRESETS.some(m => m.name === 'Whastminer M64')).toBe(false)
+  })
 })

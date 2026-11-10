@@ -121,7 +121,7 @@ export default function Layout() {
                   <a href="https://exergyheat.com/about" className="font-body text-surface-400 hover:text-surface-200 transition-colors">About</a>
                 </li>
                 <li>
-                  <a href="https://exergyheat.com/portfolio" className="font-body text-surface-400 hover:text-surface-200 transition-colors">Portfolio</a>
+                  <a href="https://exergyheat.com/case-studies" className="font-body text-surface-400 hover:text-surface-200 transition-colors">Case Studies</a>
                 </li>
               </ul>
             </div>
@@ -143,7 +143,7 @@ export default function Layout() {
                   <a href="https://exergyheat.com/faq" className="font-body text-surface-400 hover:text-surface-200 transition-colors">FAQ</a>
                 </li>
                 <li>
-                  <a href="https://exergyheat.com/blog" className="font-body text-surface-400 hover:text-surface-200 transition-colors">Blog</a>
+                  <a href="https://exergyheat.com/newsroom" className="font-body text-surface-400 hover:text-surface-200 transition-colors">Newsroom</a>
                 </li>
               </ul>
             </div>
@@ -172,7 +172,7 @@ export default function Layout() {
               </div>
               <div className="flex space-x-4">
                 <a
-                  href="https://x.com/exergy_llc"
+                  href="https://x.com/exergy_"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-surface-400 hover:text-surface-200 transition-colors"

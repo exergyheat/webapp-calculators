@@ -6,6 +6,7 @@ import SelectField from '../components/SelectField'
 import StateHeatMap from '../components/StateHeatMap'
 import SmartTooltip from '../components/SmartTooltip'
 import PdfReportButton from '../components/PdfReportButton'
+import Phase0Cta from '../components/Phase0Cta'
 import SEO from '../components/SEO'
 import type { HashrateHeatingReportData, PdfChartData, PdfStateRanking, PdfMiniRanking } from '../pdf/types'
 
@@ -2379,12 +2380,6 @@ export default function HashrateHeating() {
                 <div className="min-w-0">
                   <div className="font-semibold text-sm sm:text-base">Free or Paid Heating!</div>
                   <div className="text-xs sm:text-sm text-green-700 dark:text-green-400">Mining revenue exceeds electricity costs. You&apos;re effectively being paid to heat.</div>
-                  <a
-                    href="https://exergyheat.com"
-                    className="inline-flex items-center gap-1 mt-1 text-xs font-medium text-green-600 dark:text-green-400 hover:underline"
-                  >
-                    See what Exergy offers →
-                  </a>
                 </div>
               </div>
             )}
@@ -2396,12 +2391,6 @@ export default function HashrateHeating() {
                 <div className="min-w-0">
                   <div className="font-semibold text-sm sm:text-base">Hashrate Heating Recommended</div>
                   <div className="text-xs sm:text-sm text-blue-700 dark:text-blue-400">{arbitrageResult ? `${arbitrageResult.savingsPercent.toFixed(0)}% savings` : 'Savings'} vs {getFuelSpecs(fuelType, selectedCountry).label}. Mining offsets {(copeResult.R * 100).toFixed(0)}% of your electricity cost.</div>
-                  <a
-                    href="https://exergyheat.com"
-                    className="inline-flex items-center gap-1 mt-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
-                  >
-                    See what Exergy offers →
-                  </a>
                 </div>
               </div>
             )}
@@ -2436,6 +2425,8 @@ export default function HashrateHeating() {
             defaultElectricityRate={defaultRegionRates.electricity}
             defaultFuelRate={defaultRegionRates.fuel}
           />
+
+          <Phase0Cta />
         </div>
       )}
     </div>
