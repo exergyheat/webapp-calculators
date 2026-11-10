@@ -9,7 +9,7 @@ export default function Home() {
     '@type': 'WebSite',
     name: 'Exergy Calculators - Bitcoin Mining Economics',
     description: 'Free calculators for Bitcoin mining economics: hashrate heating and solar monetization analysis.',
-    url: 'https://webapp-calculators.example.com',
+    url: 'https://calc.exergyheat.com',
   }
 
   return (

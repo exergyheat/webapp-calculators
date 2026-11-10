@@ -19,7 +19,7 @@ export default function SEO({
 }: SEOProps) {
   const siteTitle = 'Bitcoin Mining Calculators'
   const fullTitle = `${title} | ${siteTitle}`
-  const siteUrl = 'https://webapp-calculators.example.com' // Update with actual URL
+  const siteUrl = 'https://calc.exergyheat.com'
   const defaultImage = `${siteUrl}/og-image.png`
 
   return (
@@ -40,6 +40,7 @@ export default function SEO({
 
       {/* Twitter Card */}
       <meta name="twitter:card" content="summary_large_image" />
+      <meta name="twitter:site" content="@exergy_" />
       <meta name="twitter:title" content={fullTitle} />
       <meta name="twitter:description" content={description} />
       <meta name="twitter:image" content={defaultImage} />
